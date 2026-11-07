@@ -157,20 +157,10 @@ export function renderMarkdownReport(findings: AuditFinding[], meta: ReportMeta)
 }
 
 function createDiffSnippet(f: AuditFinding): string {
-  return [
-    '```diff',
-    `- // current (vulnerable)`,
-    ...f.description
-      .slice(0, 400)
-      .split('\n')
-      .map((l) => `# ${l}`),
-    '+ // FIX',
-    ...(f.codeSnippet ?? f.suggestedFix ?? '')
-      .slice(0, 400)
-      .split('\n')
-      .map((l) => (l.startsWith('+') || l.startsWith('-') ? l : `+ ${l}`)),
-    '```',
-  ].join('\n');
+  // Show the flagged code as context (' '), and the recommendation as an added fix ('+').
+  const refLines = (f.codeSnippet ?? '').slice(0, 400).split('\n').map((l) => ` ${l}`);
+  const fixLines = (f.suggestedFix ?? '').slice(0, 200).split('\n').map((l) => `+ ${l}`);
+  return ['```diff', ...refLines, '', ...fixLines, '```'].join('\n');
 }
 
 function escapeTable(text: string): string {

@@ -233,7 +233,7 @@ const SECURITY_RULES: StaticRule[] = [
     severity: 'Critical',
     title: 'Command Injection via shell string building',
     regex: /\bexec(?:Sync)?\s*\([^)]*(?:\+\s*\w+|\$\{)/,
-    description: 'A shell command is built from untrusted input and passed to exec/sechenov - OWASP A03 Command Injection.',
+    description: 'A shell command is built from untrusted input and passed to exec/spawn - OWASP A03 Command Injection.',
     fix: 'Use spawn with an args-array (no shell), or a vetted library API; validate input against an allowlist.',
   },
   {
