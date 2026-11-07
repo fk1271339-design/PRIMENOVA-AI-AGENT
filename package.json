@@ -1,0 +1,25 @@
+{
+  "name": "hyperdev-ai-agent",
+  "version": "1.0.0",
+  "description": "HyperDev Autonomous AI Agent Core",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "dotenv": "^18.0.9",
+    "groq-sdk": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
