@@ -10,9 +10,10 @@ import { readFileContent } from '../engine/fileSystem.js';
  *   2. Code Quality Reviewer - performance, missing error handling, type safety, cleanliness.
  *   3. Dependency Checker - unsafe dependency versions / risky usage in manifests.
  *
- * Each persona runs as a Groq LLM call with a strict JSON contract, PLUS deterministic
- * static scanners (always run, even when the LLM layer is unavailable) so the pipeline
- * never reports an empty audit because of API issues.
+ * Each persona runs as a Groq LLM call with a strict JSON contract (with a salvage
+ * parser for token-truncated responses), PLUS deterministic static scanners
+ * (always run, even when the LLM layer is unavailable) so the pipeline never
+ * reports an empty audit because of API issues.
  */
 
 export const AUDIT_MODEL = 'openai/gpt-oss-120b';
@@ -113,7 +114,21 @@ Respond ONLY with a JSON object, no markdown fences, in exactly this shape:
   ]
 }`;
 
-function getGroq(): Groq | null {
+/** Free-tier Groq TPM caps are tight (8k tokens/min) - keep request sizes well inside. */
+const PAYLOAD_LIMITS = { diffChars: 4_000, filesChars: 7_000 };
+
+function personaPayload(
+  diff: string,
+  files: ReviewedFile[],
+  limits: { diffChars: number; filesChars: number } = PAYLOAD_LIMITS
+): string {
+  const trimmedFiles = files.map((f) => `### FILE: ${f.path}\n${f.content}`).join('\n\n');
+  return `Unified diff of the change under review:\n\n${diff.slice(0, limits.diffChars)}\n\n` +
+    `Full contents of the changed files:\n\n${trimmedFiles.slice(0, limits.filesChars)}`;
+}
+
+/** Shared Groq client factory; returns null when credentials are unavailable. */
+export function getGroq(): Groq | null {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) return null;
   return new Groq({ apiKey });
@@ -129,20 +144,61 @@ export function extractJsonBlock(text: string): unknown | null {
   try {
     return JSON.parse(candidate.slice(start, end + 1));
   } catch {
-    return null;
+    // Truncated / malformed output (e.g. hit the token cap mid-array):
+    // salvage every fully-closed {...} fragment that carries a finding.
+    return salvageFindingsFromText(candidate);
   }
 }
 
-function personaPayload(diff: string, files: ReviewedFile[]): string {
-  const trimmedFiles = files.map((f) => `### FILE: ${f.path}\n${f.content}`).join('\n\n');
-  return `Unified diff of the change under review:\n\n${diff.slice(0, 12_000)}\n\n` +
-    `Full contents of the changed files:\n\n${trimmedFiles.slice(0, 20_000)}`;
+function salvageFindingsFromText(text: string): unknown | null {
+  const objects: Array<Record<string, unknown>> = [];
+  let depth = 0;
+  let objStart = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') {
+      if (depth === 0) objStart = i;
+      depth++;
+    } else if (ch === '}') {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && objStart !== -1) {
+          try {
+            const obj = JSON.parse(text.slice(objStart, i + 1)) as Record<string, unknown>;
+            if (obj && typeof obj === 'object' && ('title' in obj || 'findings' in obj)) {
+              objects.push(obj);
+            }
+          } catch {
+            // skip invalid fragment
+          }
+        }
+      }
+    }
+  }
+
+  const usable = objects.filter((o) => Array.isArray(o.findings));
+  if (usable.length > 0) {
+    const merged = usable.flatMap((o) => o.findings as unknown[]);
+    return { summary: '', findings: merged };
+  }
+  if (objects.length > 0) return { summary: '', findings: objects };
+  return null;
 }
 
 async function runPersona(
   persona: string,
   systemPrompt: string,
-  userPayload: string
+  buildPayload: (limits: { diffChars: number; filesChars: number }) => string
 ): Promise<PersonaAudit | null> {
   const groq = getGroq();
   if (!groq) {
@@ -150,14 +206,32 @@ async function runPersona(
     return null;
   }
 
-  const response = await groq.chat.completions.create({
-    model: AUDIT_MODEL,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPayload },
-    ],
-    temperature: 0.1,
-  });
+  const create = async (payload: string) =>
+    groq.chat.completions.create({
+      model: AUDIT_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: payload },
+      ],
+      temperature: 0.1,
+    });
+
+  let response;
+  try {
+    response = await create(buildPayload(PAYLOAD_LIMITS));
+  } catch (err) {
+    // Free-tier TPM limits (e.g. 413 "Request too large") - retry once with a halved payload.
+    if ((err as { status?: number }).status === 413) {
+      console.warn(`[Auditor] Payload too large for ${persona} - retrying with a halved payload...`);
+      const halved = {
+        diffChars: Math.floor(PAYLOAD_LIMITS.diffChars / 2),
+        filesChars: Math.floor(PAYLOAD_LIMITS.filesChars / 2),
+      };
+      response = await create(buildPayload(halved));
+    } else {
+      throw err;
+    }
+  }
 
   const raw = response.choices[0]?.message?.content ?? '';
   const parsed = extractJsonBlock(raw) as PersonaAudit | null;
@@ -183,16 +257,18 @@ async function runPersona(
 }
 
 export async function runSecurityAuditor(diff: string, files: ReviewedFile[]): Promise<PersonaAudit | null> {
-  return runPersona('Security Auditor', SECURITY_AUDITOR_SYSTEM, personaPayload(diff, files));
+  return runPersona('Security Auditor', SECURITY_AUDITOR_SYSTEM, (limits) => personaPayload(diff, files, limits));
 }
 
 export async function runQualityReviewer(diff: string, files: ReviewedFile[]): Promise<PersonaAudit | null> {
-  return runPersona('Code Quality Reviewer', QUALITY_REVIEWER_SYSTEM, personaPayload(diff, files));
+  return runPersona('Code Quality Reviewer', QUALITY_REVIEWER_SYSTEM, (limits) => personaPayload(diff, files, limits));
 }
 
 export async function runDependencyChecker(manifests: ReviewedFile[]): Promise<PersonaAudit | null> {
-  const payload = `Package manifest(s) under review:\n\n${manifests.map((f) => `### FILE: ${f.path}\n${f.content}`).join('\n\n')}`;
-  return runPersona('Dependency Checker', DEPENDENCY_CHECKER_SYSTEM, payload);
+  return runPersona('Dependency Checker', DEPENDENCY_CHECKER_SYSTEM, (limits) => {
+    const payload = `Package manifest(s) under review:\n\n${manifests.map((f) => `### FILE: ${f.path}\n${f.content}`).join('\n\n')}`;
+    return payload.slice(0, limits.filesChars + limits.diffChars + 200);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +281,8 @@ interface StaticRule {
   regex: RegExp;
   description: string;
   fix: string;
+  /** If the match context satisfies `softenIf`, downgrade to a softer severity/title. */
+  softenIf?: { contextRegex: RegExp; severity: Severity; title: string };
 }
 
 const SECURITY_RULES: StaticRule[] = [
@@ -242,6 +320,12 @@ const SECURITY_RULES: StaticRule[] = [
     regex: /\.(?:innerHTML|innerText)\s*=|document\.write\s*\(/,
     description: 'Unsanitized data is written into the DOM, enabling stored/reflected XSS (OWASP A03).',
     fix: 'Use textContent, or sanitize with DOMPurify before injecting HTML into the DOM.',
+    softenIf: {
+      // DOMPurify/textContent-style sanitization around the assignment -> downgrade to review note.
+      contextRegex: /DOMPurify|textContent|sanitiz/i,
+      severity: 'Low',
+      title: 'Sanitized innerHTML assignment (verify sanitizer coverage)',
+    },
   },
   {
     severity: 'High',
@@ -298,10 +382,26 @@ function applyRules(persona: string, rules: StaticRule[], files: ReviewedFile[])
     for (const rule of rules) {
       const m = file.content.match(rule.regex);
       if (!m) continue;
+
+      // Optional softening: sanitization context downgrades the raw-match severity.
+      let severity = rule.severity;
+      let title = rule.title;
+      if (rule.softenIf) {
+        const lines = file.content.split('\n');
+        const lineNo = lines.findIndex((l) => rule.regex.test(l));
+        if (lineNo !== -1) {
+          const context = lines.slice(Math.max(0, lineNo - 3), lineNo + 4).join('\n');
+          if (rule.softenIf.contextRegex.test(context)) {
+            severity = rule.softenIf.severity;
+            title = rule.softenIf.title;
+          }
+        }
+      }
+
       findings.push({
         persona,
-        severity: rule.severity,
-        title: rule.title,
+        severity,
+        title,
         file: file.path,
         lines: ruleLineNo(file.content, rule.regex),
         description: `${rule.description} Matched: ${JSON.stringify(m[0].slice(0, 120))}`,
@@ -328,7 +428,7 @@ export function runStaticDependencyScan(manifestPath: string, packageJson: strin
   const findings: AuditFinding[] = [];
   try {
     const parsed = JSON.parse(packageJson) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
-    const sections = Array.from(Object.entries({ dependencies: parsed.dependencies ?? {}, devDependencies: parsed.devDependencies ?? {} })) as Array<[string, Record<string, string>]>;
+    const sections: Array<[string, Record<string, string>]> = Object.entries({ dependencies: parsed.dependencies ?? {}, devDependencies: parsed.devDependencies ?? {} });
     for (const [section, deps] of sections) {
       for (const [name, version] of Object.entries(deps)) {
         if (version === '*' || version === 'latest' || !/^[\^~]?\d/.test(version)) {

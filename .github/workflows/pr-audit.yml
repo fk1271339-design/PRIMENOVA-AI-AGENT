@@ -1,0 +1,55 @@
+name: Multi-Agent PR Security Audit
+
+# Runs the HyperDev multi-agent audit engine on every pull request:
+#   1. Diffs HEAD against the PR base branch (origin/<GITHUB_BASE_REF>).
+#   2. Runs the 3 LLM personas + deterministic static scanners.
+#   3. Posts/updates the PR comment with the full audit report.
+#   4. Exits 1 when the verdict is BLOCK -> the "audit" check fails,
+#      which blocks merge once marked "Required" in branch protection.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-audit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Security & Quality Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history for the base diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run multi-agent audit (personas + static scans + PR comment)
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HYPERDEV_AUTO_FIX: 'true' # self-healing is safe in CI: patches are verified and never pushed
+        run: npx tsx src/index.ts
+
+      # Never leave reviewers in silence: if the pipeline itself crashes
+      # mid-run, post the fallback failure notice as the PR comment.
+      - name: Post fallback notice (audit pipeline crashed)
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npx tsx src/mcp/githubCommenter.ts --fallback

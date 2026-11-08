@@ -68,6 +68,44 @@ export function parseUnifiedDiff(diffText: string): DiffFile[] {
   return files;
 }
 
+/** Only sane git-ref characters are ever interpolated into a command (injection guard). */
+const VALID_BASE_REF = /^[A-Za-z0-9._\-/]+$/;
+
+/**
+ * CI snapshot: diffs HEAD against the pull-request base branch
+ * (`origin/<baseRef>...HEAD`). The base ref is strictly validated before it
+ * touches a command line, and the run falls back to `HEAD~1` when the base
+ * ref is unavailable (e.g. shallow fetches).
+ */
+export async function collectCiSnapshot(baseRef: string): Promise<GitSnapshot> {
+  if (!VALID_BASE_REF.test(baseRef)) {
+    console.warn(`[Git] Refused unsafe PR base ref: "${baseRef}"`);
+    return { available: false, status: '', diff: '', log: '', changedFiles: [] };
+  }
+
+  const [status, baseDiff, log] = await Promise.all([
+    runGitStatus(),
+    git(`diff origin/${baseRef}...HEAD --unified=3`),
+    runGitLog(5),
+  ]);
+
+  let diff = baseDiff;
+  if (baseDiff.exitCode !== 0) {
+    console.warn(`[Git] origin/${baseRef}...HEAD diff failed - falling back to the latest commit diff.`);
+    diff = await git('diff HEAD~1 --unified=3');
+  }
+
+  const available = status.exitCode === 0 && diff.exitCode === 0 && log.exitCode === 0;
+
+  return {
+    available,
+    status: status.stdout,
+    diff: available ? diff.stdout : '',
+    log: log.stdout,
+    changedFiles: available ? parseUnifiedDiff(diff.stdout) : [],
+  };
+}
+
 /** Collects a full snapshot through the sandbox. Returns `available: false` if git is unusable. */
 export async function collectGitSnapshot(): Promise<GitSnapshot> {
   const [status, diffFull, log] = await Promise.all([

@@ -41,6 +41,7 @@ export interface ReportMeta {
   generatedAt: Date;
   reviewedFiles: string[];
   personasRan: string[];
+  autoFixNote?: string;
 }
 
 export function renderMarkdownReport(findings: AuditFinding[], meta: ReportMeta): string {
@@ -56,6 +57,7 @@ export function renderMarkdownReport(findings: AuditFinding[], meta: ReportMeta)
   lines.push(`**Generated:** ${meta.generatedAt.toISOString()}`);
   lines.push(`**Reviewed files:** ${meta.reviewedFiles.length ? meta.reviewedFiles.join(', ') : 'n/a'}`);
   lines.push(`**Audit agents:** ${meta.personasRan.join(', ')}`);
+  if (meta.autoFixNote) lines.push(`**Auto-fix:** ${meta.autoFixNote}`);
   lines.push('');
 
   // -- Executive Summary -----------------------------------------------------

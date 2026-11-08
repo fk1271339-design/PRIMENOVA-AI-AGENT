@@ -104,48 +104,77 @@ async function git(command: string) {
   return executeCommand(`git ${command}`);
 }
 
-/** True when the repo already has 2+ commits AND the fixture is at the buggy revision. */
-async function fixtureAlreadyReady(): Promise<boolean> {
-  const probe = await git('rev-parse -q --verify HEAD~1');
-  if (probe.exitCode !== 0) return false;
-  try {
-    const content = await readFileContent(FIXTURE_FILE);
-    return content.includes('md5');
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Ensures the workspace contains the two-commit audit history.
- * Idempotent: skips setup when the fixture history already exists.
+ * Ensures the workspace is audit-ready:
+ *
+ * - Default local mode (`force=false`): if the repo already has a HEAD~1 commit,
+ *   the real latest commit IS the diff under review -> no fixture needed (skip).
+ *   On a fresh repo without history, creates the 2-commit demo (baseline -> buggy PR).
+ * - `force=true` (`--demo` flag): appends a fresh baseline->buggy commit pair so
+ *   the demo can be re-run even on top of real user commits.
  */
-export async function ensureAuditFixture(): Promise<void> {
-  if (await fixtureAlreadyReady()) {
-    console.log('[Fixture] Audit history already present - skipping setup.');
+export async function ensureAuditFixture(force: boolean = false): Promise<void> {
+  const headProbe = await executeCommand('git rev-parse -q --verify HEAD~1', 15_000);
+  const hasHistory = headProbe.exitCode === 0;
+
+  const buggyContentPresent = await (async () => {
+    try {
+      const content = await readFileContent(FIXTURE_FILE);
+      return content.includes('md5');
+    } catch {
+      return false;
+    }
+  })();
+
+  if (!force && hasHistory && buggyContentPresent) {
+    console.log('[Fixture] Repo has HEAD~1 - auditing the real latest commit (pass --demo for the tour).');
     return;
   }
 
-  console.log('[Fixture] Setting up two-commit audit history (git init + commits)...');
+  if (force) {
+    console.log('[Fixture] --demo requested - creating a fresh baseline -> vulnerable PR commit pair...');
+    await ensureDemoCommitsWithUniqueMessages();
+    return;
+  }
 
+  // Fresh repo (no HEAD~1): create the classic 2-commit demo history.
+  if (!hasHistory) {
+    console.log('[Fixture] Fresh repo - creating two-commit audit history (git init + commits)...');
+    await runInitialDemoHistory();
+    return;
+  }
+
+  // History exists but the buggy fixture file is gone (e.g. user's own repo).
+  console.log('[Fixture] HEAD~1 exists but fixture content changed - auditing the real latest commit.');
+}
+
+async function ensureDemoCommitsWithUniqueMessages(): Promise<void> {
+  await runInitialDemoHistory(true);
+  console.log('[Fixture] Demo history ready: vulnerable patch is at HEAD.');
+}
+
+async function runInitialDemoHistory(withUniqueSuffix: boolean = false): Promise<void> {
   const init = await git('init');
   if (init.exitCode !== 0 && !init.stdout.includes('already exists')) {
     throw new Error(`git init failed: ${init.stderr}`);
   }
 
+  const suffix = withUniqueSuffix ? `_${Date.now()}` : '';
+
   // Revision 1 (clean baseline)
   await createOrUpdateFile(FIXTURE_FILE, BASELINE);
   const add1 = await git('add .');
   if (add1.exitCode !== 0) throw new Error(`git add failed: ${add1.stderr}`);
-  const commit1 = await executeCommand(`git ${GIT_IDENTITY} commit -m baseline_prior_revision_of_demo_service`);
-  if (commit1.exitCode !== 0) throw new Error(`git commit (1) failed: ${commit1.stdout} ${commit1.stderr}`);
+  const commit1 = await executeCommand(`git ${GIT_IDENTITY} commit -m baseline_prior_revision_of_demo_service_${suffix}`);
+  const baselineCommitted = commit1.exitCode === 0;
+  if (!baselineCommitted && !commit1.stderr.includes('nothing to commit') && !commit1.stdout.includes('nothing to commit')) {
+    throw new Error(`git commit (baseline) failed: ${commit1.stdout} ${commit1.stderr}`);
+  }
 
   // Revision 2 (the buggy PR)
   await createOrUpdateFile(FIXTURE_FILE, BUGGY_PATCHED);
   const add2 = await git('add .');
   if (add2.exitCode !== 0) throw new Error(`git add failed: ${add2.stderr}`);
-  const commit2 = await executeCommand(`git ${GIT_IDENTITY} commit -m feat_dashboard_and_maintenance_utilities`);
-  if (commit2.exitCode !== 0) throw new Error(`git commit (2) failed: ${commit2.stdout} ${commit2.stderr}`);
-
-  console.log('[Fixture] Audit history ready: 2 commits, vulnerable patch is HEAD~1..HEAD.');
+  const commit2 = await executeCommand(`git ${GIT_IDENTITY} commit -m feat_dashboard_and_maintenance_utilities_${suffix}`);
+  if (commit2.exitCode !== 0) throw new Error(`git commit (buggy PR) failed: ${commit2.stdout} ${commit2.stderr}`);
 }

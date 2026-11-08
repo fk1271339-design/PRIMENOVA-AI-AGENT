@@ -1,3 +1,4 @@
 node_modules/
 dist/
 .env
+PR_SECURITY_AUDIT_REPORT.md
