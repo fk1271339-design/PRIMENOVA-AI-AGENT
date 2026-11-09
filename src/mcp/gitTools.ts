@@ -57,10 +57,11 @@ export function parseUnifiedDiff(diffText: string): DiffFile[] {
     // Prefer the b/ path (post image); fall back to the a/ path for pure deletions.
     const bLine = lines.find((l) => l.startsWith('+++ b/'));
     const aLine = lines.find((l) => l.startsWith('--- '));
-    let filePath = bLine ? bLine.slice('+++ b/'.length).trim() : aLine ? aLine.slice('--- '.length).trim() : 'unknown';
-
-    // Normalize the /dev/null delete-case and strip any quoted paths.
-    filePath = filePath.replace(/^"(.*)"$/, '$1').replace(/\t.*$/, '');
+    const postPath = bLine ? bLine.slice('+++ b/'.length).trim() : '';
+    const prePath = aLine ? aLine.slice('--- '.length).trim() : '';
+    let filePath = postPath !== '' && postPath !== '/dev/null'
+      ? postPath
+      : prePath.replace(/^a\//, '') || 'unknown';
 
     files.push({ path: filePath, patch: `diff --git ${section.trimEnd()}` });
   }
