@@ -104,8 +104,12 @@ async function verifyBuild(file: string): Promise<{ ok: boolean; output: string 
   // Files outside src/ are not covered by the project tsconfig `include`,
   // so compile them explicitly to keep the fixture-style code checked too.
   // `--ignoreConfig` is required by TS 7 when files are given on the CLI.
-  const underSrc = file.replace(/\\/g, '/').includes('/src/');
-  if (!underSrc) {
+  // Plain JS/CJS files have no type-checkable surface - the project-wide
+  // check above is the meaningful gate, a strict per-file tsc would be noise.
+  const normalizedFile = file.replace(/\\/g, '/');
+  const underSrc = normalizedFile.includes('/src/');
+  const plainJs = /\.(js|cjs|mjs)$/i.test(normalizedFile);
+  if (!underSrc && !plainJs) {
     const single = await executeCommand(
       `npx tsc --noEmit --ignoreConfig --strict --skipLibCheck --target es2022 --module nodenext --moduleResolution nodenext --types node ${file}`,
       180_000

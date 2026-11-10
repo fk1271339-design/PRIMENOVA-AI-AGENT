@@ -104,7 +104,7 @@ async function callAgentTurn(originalPayload: string): Promise<AgentTurn | null>
   let payload = originalPayload;
   let jsonMode = true; // Groq JSON mode first - prevents the strongest failure mode below.
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const response = await groq.chat.completions.create({
         model: AUDIT_MODEL,
@@ -132,7 +132,7 @@ async function callAgentTurn(originalPayload: string): Promise<AgentTurn | null>
       // without JSON mode plus an explicit no-tools reminder.
       if (status === 400 && /tool/i.test(message)) {
         console.warn('[Coder] Model attempted a native tool call - retrying with an explicit plain-JSON reminder...');
-        jsonMode = false;
+        // Keep JSON mode ON: dropping it derails the model from the protocol.
         payload = `${originalPayload}\n\nREMINDER: You have NO tools available in this conversation. Do NOT attempt to call any tool or function. Respond ONLY with plain-text JSON matching the required shape.`;
         continue;
       }
@@ -288,6 +288,13 @@ export async function runCoderAgent(userRequest: string, maxSteps: number = 14):
         if (!COMMAND_ALLOWLIST.test(command)) {
           notes.push(`Blocked command outside the allowlist: ${command}`);
           progress += `${stamp}\nBLOCKED (allowlist): ${command}\nUse npm/npx/node/git/tsc only.\n`;
+          break;
+        }
+        // Allowlist only validates the PREFIX - a "npm ... && rm ..." chain
+        // would sneak past it. Chains are rejected outright.
+        if (/&&|\|\||[;|]/.test(command)) {
+          notes.push(`Blocked chained command: ${command}`);
+          progress += `${stamp}\nBLOCKED (chains are not allowed): ${command}\nRun ONE command per turn.\n`;
           break;
         }
         await runShellCommand(stamp, command);

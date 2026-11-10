@@ -18,6 +18,7 @@ import { renderMarkdownReport, writeReport, resolveMergeStatus, REPORT_FILENAME 
 import { postOrUpdateAuditComment, extractVerdict } from './mcp/githubCommenter.js';
 import { runAutoFixer, isStaleDependencyFinding, type AutoFixResult } from './mcp/autofixer.js';
 import { runCoderAgent } from './mcp/coderAgent.js';
+import { listWorkspaceFiles } from './mcp/workspaceTools.js';
 
 /**
  * Multi-Agent PR Reviewer & Security Auditor - end-to-end pipeline.
@@ -46,8 +47,97 @@ const DEFAULT_DEV_REQUEST =
   'package.json (express dependency, start script), server file exposing ' +
   'list/create/complete/delete endpoints with in-memory storage, and a README.md.';
 
+/** Everything the coder agent writes lands exclusively in this folder. */
+const GENERATED_DIR = 'generated_app';
+
+/** DEV-MODE audit - load every generated file (untracked, so no git diff here). */
+async function loadGeneratedFiles(dir: string): Promise<ReviewedFile[]> {
+  const relFiles = (await listWorkspaceFiles(dir, { maxDepth: 6, maxEntries: 200 })).filter((f) => !f.endsWith('/'));
+  const reviewed: ReviewedFile[] = [];
+  for (const rel of relFiles) {
+    try {
+      reviewed.push({ path: rel, content: await readFileContent(rel) });
+    } catch (err) {
+      console.warn(`[DevAudit] skip ${rel}: ${(err as Error).message}`);
+    }
+  }
+  return reviewed;
+}
+
+/** Deterministic scans over generated code (fast, LLM-independent). */
+async function staticScanGenerated(reviewed: ReviewedFile[]): Promise<AuditFinding[]> {
+  const manifestFile = reviewed.find((f) => f.path.endsWith('package.json'));
+  const manifest = manifestFile
+    ? await readFileContent(manifestFile.path).catch(() => '{"dependencies":{}}')
+    : '{"dependencies":{}}';
+  const sec = runStaticSecurityScan(reviewed);
+  const qual = runStaticQualityScan(reviewed);
+  const dep = manifestFile ? runStaticDependencyScan(manifestFile.path, manifest) : [];
+  return [...sec, ...qual, ...dep].sort(severityComparer);
+}
+
+/** One full audit pass over the generated workspace (static + all LLM personas). */
+async function auditGeneratedCode(
+  dir: string
+): Promise<{ findings: AuditFinding[]; llmAudits: Array<PersonaAudit | null> }> {
+  const reviewed = await loadGeneratedFiles(dir);
+  console.log(`[DevAudit] ${reviewed.length} generated file(s) under review.`);
+
+  const staticFindings = await staticScanGenerated(reviewed);
+  console.log(`[DevAudit] Static scans: ${staticFindings.length} finding(s).`);
+
+  console.log('[DevAudit] Running LLM personas on the generated code...');
+  const security = await runSecurityAuditor('(newly generated files - full contents below)', reviewed);
+  const quality = await runQualityReviewer('(newly generated files - full contents below)', reviewed);
+  const manifestFile = reviewed.find((f) => f.path.endsWith('package.json'));
+  const dependency = manifestFile
+    ? await runDependencyChecker([{ path: manifestFile.path, content: manifestFile.content }])
+    : null;
+
+  const llmFindings = mergeFindings([security, quality, dependency]).filter((f) => !isStaleDependencyFinding(f));
+  console.log(`[DevAudit] LLM personas: ${llmFindings.length} finding(s).`);
+
+  return {
+    findings: [...staticFindings, ...llmFindings].sort(severityComparer),
+    llmAudits: [security, quality, dependency],
+  };
+}
+
+/** Post-fix refresh: static re-scan of fresh files + stale LLM findings for untouched files. */
+async function refreshDevFindings(
+  dir: string,
+  llmAudits: Array<PersonaAudit | null>,
+  fixedFiles: Set<string>
+): Promise<AuditFinding[]> {
+  const fresh = await staticScanGenerated(await loadGeneratedFiles(dir));
+  const staleLlm = mergeFindings(llmAudits).filter(
+    (f) => !fixedFiles.has(f.file) && !isStaleDependencyFinding(f)
+  );
+  return [...staleLlm, ...fresh].sort(severityComparer);
+}
+
+/** Writes the dev-mode audit report with the same enterprise format. */
+async function writeDevReport(findings: AuditFinding[], autoFixNote?: string): Promise<void> {
+  const files = await listWorkspaceFiles(GENERATED_DIR, { maxDepth: 6, maxEntries: 200 });
+  await writeReport(
+    renderMarkdownReport(findings, {
+      generatedAt: new Date(),
+      reviewedFiles: files,
+      personasRan: [
+        ...new Set([
+          ...findings.map((f) => f.persona),
+          'Security Auditor',
+          'Code Quality Reviewer',
+          'Dependency Checker',
+        ]),
+      ],
+      autoFixNote,
+    })
+  );
+}
+
 /** Dev-mode entry: autonomous code generation instead of the audit pipeline. */
-async function runDevMode(prompt: string): Promise<void> {
+async function runDevMode(prompt: string, autoFixRequested: boolean = false): Promise<void> {
   console.log('=========================================================');
   console.log(' HyperDev Autonomous Developer Agent - DEV MODE');
   console.log('=========================================================');
@@ -73,11 +163,60 @@ async function runDevMode(prompt: string): Promise<void> {
   }
   for (const note of result.notes) console.log(` note: ${note}`);
 
-  if (result.completed) {
-    console.log('\n Next steps - inspect & verify the generated project your own way, e.g.:');
-    console.log('   npx tsx src/index.ts        (audit your new files with the multi-agent engine)');
+  if (!result.completed) {
+    for (const note of result.notes) console.log(` note: ${note}`);
+    process.exitCode = 1;
+    return;
   }
-  process.exitCode = result.completed ? 0 : 1;
+
+  // --- Instant Security Audit + opt-in self-healing of the generated code ---
+  console.log('\n=========================================================');
+  console.log(' DevAudit - Security Auditor on the freshly generated code');
+  console.log('=========================================================');
+
+  const firstPass = await auditGeneratedCode(GENERATED_DIR);
+  let findings = firstPass.findings;
+  await writeDevReport(findings);
+
+  let verdict = resolveMergeStatus(findings);
+  console.log(` DevAudit verdict: ${verdict.verdict === 'BLOCK' ? '🚫 BLOCK' : '🟢 PASS'} - ${verdict.reason}`);
+
+  const hasBlocking = findings.some((f) => f.severity === 'Critical' || f.severity === 'High');
+  if (autoFixRequested && hasBlocking) {
+    console.log('\n[DevAudit] --auto-fix active - self-healing the generated code...');
+    const fixResult = await runAutoFixer(findings);
+
+    for (const outcome of fixResult.outcomes) {
+      const icon =
+        outcome.status === 'fixed' ? '✅' :
+        outcome.status === 'rolledback' ? '↩️' :
+        outcome.status === 'unchanged' ? '➖' : '❌';
+      console.log(`[DevAudit] ${icon} [${outcome.severity}] ${outcome.title} (${outcome.file}) -> ${outcome.status}`);
+    }
+
+    if (fixResult.fixed > 0) {
+      const fixedFiles = new Set(fixResult.outcomes.filter((o) => o.status === 'fixed').map((o) => o.file));
+      findings = await refreshDevFindings(GENERATED_DIR, firstPass.llmAudits, fixedFiles);
+      await writeDevReport(
+        findings,
+        `${fixResult.fixed} fix(es) applied, ${fixResult.rolledback} rolled back, ${fixResult.failed} failed.`
+      );
+      verdict = resolveMergeStatus(findings);
+      console.log(`\n DevAudit post-fix verdict: ${verdict.verdict === 'BLOCK' ? '🚫 BLOCK' : '🟢 PASS'} - ${verdict.reason}`);
+    }
+  } else if (autoFixRequested) {
+    console.log('\n[DevAudit] Nothing to auto-fix (no Critical/High findings).');
+  }
+
+  console.log('\n=========================================================');
+  if (verdict.verdict === 'BLOCK') {
+    console.log(' SECURE DELIVERY BLOCKED 🚫 - fix the findings above before shipping.');
+    process.exitCode = 1;
+  } else {
+    console.log(' SECURE DELIVERY COMPLETE ✅ - generated code passed the audit.');
+    console.log(' Report: PR_SECURITY_AUDIT_REPORT.md | Files: generated_app/');
+  }
+  console.log('=========================================================');
 }
 
 const SEVERITY_RANK = { Critical: 0, High: 1, Medium: 2, Low: 3 } as const;
@@ -154,7 +293,10 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    await runDevMode(prompt || DEFAULT_DEV_REQUEST);
+    await runDevMode(
+      prompt || DEFAULT_DEV_REQUEST,
+      cliArgs.includes('--auto-fix') || process.env.HYPERDEV_AUTO_FIX === 'true'
+    );
     return;
   }
 
