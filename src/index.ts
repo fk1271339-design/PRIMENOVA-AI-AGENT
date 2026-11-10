@@ -17,6 +17,7 @@ import {
 import { renderMarkdownReport, writeReport, resolveMergeStatus, REPORT_FILENAME } from './mcp/reporter.js';
 import { postOrUpdateAuditComment, extractVerdict } from './mcp/githubCommenter.js';
 import { runAutoFixer, isStaleDependencyFinding, type AutoFixResult } from './mcp/autofixer.js';
+import { runCoderAgent } from './mcp/coderAgent.js';
 
 /**
  * Multi-Agent PR Reviewer & Security Auditor - end-to-end pipeline.
@@ -31,9 +32,53 @@ import { runAutoFixer, isStaleDependencyFinding, type AutoFixResult } from './mc
  * CI mode (GITHUB_ACTIONS=true):
  *   Diffs HEAD against origin/<GITHUB_BASE_REF>, audits the PR, posts the
  *   report as a PR comment, and exits 1 when the final verdict is BLOCK.
+ *
+ * DEV MODE (--dev-mode | --build "<prompt>"):
+ *   Autonomous workspace builder ("AntiGravity-Lite"): plans a file tree,
+ *   writes the project under generated_app/, installs dependencies, runs
+ *   build checks through the sandbox, and self-corrects on errors.
  */
 
 const IS_CI = process.env.GITHUB_ACTIONS === 'true';
+
+const DEFAULT_DEV_REQUEST =
+  'Build a small runnable Node.js + Express TODO API inside generated_app/: ' +
+  'package.json (express dependency, start script), server file exposing ' +
+  'list/create/complete/delete endpoints with in-memory storage, and a README.md.';
+
+/** Dev-mode entry: autonomous code generation instead of the audit pipeline. */
+async function runDevMode(prompt: string): Promise<void> {
+  console.log('=========================================================');
+  console.log(' HyperDev Autonomous Developer Agent - DEV MODE');
+  console.log('=========================================================');
+  console.log(` Request: ${prompt}\n`);
+
+  if (!process.env.GROQ_API_KEY) {
+    console.error('[DevMode] GROQ_API_KEY is required for the autonomous developer - set it in .env first.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const result = await runCoderAgent(prompt);
+
+  console.log('\n=========================================================');
+  console.log(` DEV RUN ${result.completed ? 'COMPLETE ✅' : result.aborted ? 'ABORTED 🟠' : 'INCOMPLETE 🔶'}`);
+  console.log('=========================================================');
+  console.log(` Steps used:      ${result.stepsUsed}`);
+  console.log(` Files written:   ${result.filesWritten.length}`);
+  for (const file of result.filesWritten) console.log(`   - ${file}`);
+  console.log(` Commands run:    ${result.commandsRun.length}`);
+  if (result.finalCheck) {
+    console.log(` Final check:     ${result.finalCheck.command} -> ${result.finalCheck.passed ? 'PASSED ✅' : 'FAILED ❌'}`);
+  }
+  for (const note of result.notes) console.log(` note: ${note}`);
+
+  if (result.completed) {
+    console.log('\n Next steps - inspect & verify the generated project your own way, e.g.:');
+    console.log('   npx tsx src/index.ts        (audit your new files with the multi-agent engine)');
+  }
+  process.exitCode = result.completed ? 0 : 1;
+}
 
 const SEVERITY_RANK = { Critical: 0, High: 1, Medium: 2, Low: 3 } as const;
 
@@ -95,13 +140,30 @@ async function buildPostFixFindings(
 }
 
 async function main(): Promise<void> {
+  const cliArgs = process.argv.slice(2);
+  const buildFlagIdx = cliArgs.indexOf('--build');
+
+  // --- Dev mode: autonomous workspace builder -------------------------------
+  if (cliArgs.includes('--dev-mode') || buildFlagIdx !== -1) {
+    const prompt =
+      buildFlagIdx !== -1
+        ? cliArgs.slice(buildFlagIdx + 1).join(' ').replace(/\s+--\w+.*$/, '').trim()
+        : '';
+    if (buildFlagIdx !== -1 && !prompt) {
+      console.error('[DevMode] --build requires a prompt, e.g. --build "Build a TODO app".');
+      process.exitCode = 1;
+      return;
+    }
+    await runDevMode(prompt || DEFAULT_DEV_REQUEST);
+    return;
+  }
+
   console.log('=========================================================');
   console.log(' HyperDev Multi-Agent PR Reviewer & Security Auditor');
   console.log(` Mode: ${IS_CI ? 'CI (GitHub Actions PR audit)' : 'Local (latest commit audit)'}`);
   console.log('=========================================================');
 
-  const autoFixRequested =
-    process.argv.slice(2).includes('--auto-fix') || process.env.HYPERDEV_AUTO_FIX === 'true';
+  const autoFixRequested = cliArgs.includes('--auto-fix') || process.env.HYPERDEV_AUTO_FIX === 'true';
 
   if (!process.env.GROQ_API_KEY) {
     console.warn('[Warning] GROQ_API_KEY missing - LLM personas will be skipped, static scanners only.');
