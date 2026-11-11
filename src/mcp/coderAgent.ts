@@ -1,5 +1,5 @@
 import { AUDIT_MODEL, extractJsonBlock, getGroq } from './auditor.js';
-import { buildFileTree, injectCodeFiles, runWorkspaceCommand, SAFE_COMMAND_ALLOWLIST, validateInjectPath } from './workspaceTools.js';
+import { buildFileTree, hasCommandChain, injectCodeFiles, runWorkspaceCommand, SAFE_COMMAND_ALLOWLIST, validateInjectPath } from './workspaceTools.js';
 
 /**
  * Autonomous Developer Agent ("AntiGravity-Lite") - prompt-driven loop:
@@ -47,7 +47,11 @@ ACTION RULES:
 6. "finish" only when install AND verification succeeded (or explain in reason why not possible).
 7. "abort" if the request is impossible or unsafe - explain in reason.
 8. Once all essential source files are created and pass basic node verification,
-   explicitly declare FINISH instead of attempting redundant terminal reads.`;
+   explicitly declare FINISH instead of attempting redundant terminal reads.
+9. NEVER run chained node -e scripts using semicolons (;). To view file contents,
+   use single standard commands like "cat generated_app/<file>" or "type generated_app/<file>".
+   If a verification command fails, immediately write a corrected file with
+   "write_files" instead of retrying blocked shell inspections.`;
 
 type AgentAction = 'plan' | 'write_files' | 'shell' | 'finish' | 'abort';
 
@@ -295,8 +299,9 @@ export async function runCoderAgent(userRequest: string, maxSteps: number = MAX_
           break;
         }
         // Allowlist only validates the PREFIX - a "npm ... && rm ..." chain
-        // would sneak past it. Chains are rejected outright.
-        if (/&&|\|\||[;|]/.test(command)) {
+        // would sneak past it. Chains (outside quotes) are rejected outright;
+        // single inspection commands like `cat file.js` pass cleanly.
+        if (hasCommandChain(command)) {
           notes.push(`Blocked chained command: ${command}`);
           progress += `${stamp}\nBLOCKED (chains are not allowed): ${command}\nRun ONE command per turn.\n`;
           break;

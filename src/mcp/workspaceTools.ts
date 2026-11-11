@@ -25,6 +25,29 @@ const DIR_IGNORE_LIST = new Set([
 export const SAFE_COMMAND_ALLOWLIST =
   /^(npm\b|npx\b|node\b|git\b|tsc\b|cat\b|type\b|dir\b|ls\b|echo\b)/;
 
+/**
+ * Detects command chaining (&&, ||, ;, |) OUTSIDE of quoted strings, so that
+ * single inspection commands like `cat generated_app/cli.js` or
+ * `type "generated_app/my notes.json"` pass cleanly while genuine
+ * multi-command strings (`a && b`, `node -e "...; ...;"`) are rejected.
+ */
+export function hasCommandChain(command: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === '"' && !inSingle) inDouble = !inDouble;
+    else if (inSingle || inDouble) continue; // separators inside quotes are data
+    else if (ch === ';' || ch === '|') return true; // `;`, `|`, `||` all chain
+    else if (ch === '&' && command[i + 1] === '&') {
+      i++;
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Runs a command in the workspace through the hardened sandbox. */
 export async function runWorkspaceCommand(command: string, timeoutMs: number = 120_000): Promise<ExecutionResult> {
   console.log(`[Workspace] $ ${command}`);
