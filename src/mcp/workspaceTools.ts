@@ -16,6 +16,15 @@ const DIR_IGNORE_LIST = new Set([
   'node_modules', '.git', 'dist', 'build', 'out', '.next', 'coverage', '.venv', '__pycache__',
 ]);
 
+/**
+ * Safe command prefixes for the autonomous agent's shell actions.
+ * Inspection commands (cat/type/dir/ls) are deliberately allowed: on a strict
+ * sandbox they may exit non-zero, but the agent gets the real error output
+ * back instead of a hard block - no wasted turns guessing why.
+ */
+export const SAFE_COMMAND_ALLOWLIST =
+  /^(npm\b|npx\b|node\b|git\b|tsc\b|cat\b|type\b|dir\b|ls\b|echo\b)/;
+
 /** Runs a command in the workspace through the hardened sandbox. */
 export async function runWorkspaceCommand(command: string, timeoutMs: number = 120_000): Promise<ExecutionResult> {
   console.log(`[Workspace] $ ${command}`);

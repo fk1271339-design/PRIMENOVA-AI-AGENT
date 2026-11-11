@@ -1,5 +1,5 @@
 import { AUDIT_MODEL, extractJsonBlock, getGroq } from './auditor.js';
-import { buildFileTree, injectCodeFiles, runWorkspaceCommand, validateInjectPath } from './workspaceTools.js';
+import { buildFileTree, injectCodeFiles, runWorkspaceCommand, SAFE_COMMAND_ALLOWLIST, validateInjectPath } from './workspaceTools.js';
 
 /**
  * Autonomous Developer Agent ("AntiGravity-Lite") - prompt-driven loop:
@@ -45,7 +45,9 @@ ACTION RULES:
 4. After installing dependencies, ALWAYS run a build/syntax check before "finish".
 5. If a command fails, READ the error output, fix the files, and re-run (self-correct).
 6. "finish" only when install AND verification succeeded (or explain in reason why not possible).
-7. "abort" if the request is impossible or unsafe - explain in reason.`;
+7. "abort" if the request is impossible or unsafe - explain in reason.
+8. Once all essential source files are created and pass basic node verification,
+   explicitly declare FINISH instead of attempting redundant terminal reads.`;
 
 type AgentAction = 'plan' | 'write_files' | 'shell' | 'finish' | 'abort';
 
@@ -77,7 +79,9 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 const MAX_FILES_PER_TURN = 2;
 const MAX_FILE_CHARS = 8_000;
-const COMMAND_ALLOWLIST = /^(npm\b|npx\b|node\b|git\b|tsc\b|ls\b|dir\b|echo\b)/;
+/** Hard step budget for one dev run - each step is one agent action turn. */
+const MAX_STEPS = 20;
+
 /** Same failing command twice in a row = change approach, don't hammer. */
 const MAX_REPEAT_FAILURES = 2;
 
@@ -155,7 +159,7 @@ async function callAgentTurn(originalPayload: string): Promise<AgentTurn | null>
   return null;
 }
 
-export async function runCoderAgent(userRequest: string, maxSteps: number = 14): Promise<CoderResult> {
+export async function runCoderAgent(userRequest: string, maxSteps: number = MAX_STEPS): Promise<CoderResult> {
   const notes: string[] = [];
   const filesWritten: string[] = [];
   const commandsRun: string[] = [];
@@ -285,7 +289,7 @@ export async function runCoderAgent(userRequest: string, maxSteps: number = 14):
           progress += `${stamp}\nRESULT: empty command ignored.\n`;
           break;
         }
-        if (!COMMAND_ALLOWLIST.test(command)) {
+        if (!SAFE_COMMAND_ALLOWLIST.test(command)) {
           notes.push(`Blocked command outside the allowlist: ${command}`);
           progress += `${stamp}\nBLOCKED (allowlist): ${command}\nUse npm/npx/node/git/tsc only.\n`;
           break;
