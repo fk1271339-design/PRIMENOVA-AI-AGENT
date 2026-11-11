@@ -32,6 +32,10 @@ export const SAFE_COMMAND_ALLOWLIST =
  * multi-command strings (`a && b`, `node -e "...; ...;"`) are rejected.
  */
 export function hasCommandChain(command: string): boolean {
+  // `node -e "a; b"` is a chain in disguise: the semicolons live inside the
+  // quoted eval script but still execute multiple statements.
+  if (/\bnode\b[^;]*\b(-e|--eval)\b/i.test(command) && /;/.test(command)) return true;
+
   let inSingle = false;
   let inDouble = false;
   for (let i = 0; i < command.length; i++) {
