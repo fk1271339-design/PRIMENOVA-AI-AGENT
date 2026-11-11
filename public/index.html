@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HyperDev Workspace UI</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #2a3240;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #4f8ef7;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --mono: "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    padding: 10px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 14px; background: var(--panel);
+  }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .badge {
+    margin-left: auto; padding: 4px 12px; border-radius: 20px;
+    font-size: 12px; font-weight: 600; border: 1px solid var(--border);
+    color: var(--muted); background: var(--panel-2);
+  }
+  .badge.pass { color: var(--green); border-color: var(--green); }
+  .badge.block { color: var(--red); border-color: var(--red); }
+  .badge.running { color: var(--yellow); border-color: var(--yellow); }
+
+  .promptbar {
+    display: flex; gap: 10px; padding: 12px 18px;
+    border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  .promptbar input {
+    flex: 1; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; font-size: 14px; font-family: var(--mono);
+  }
+  .promptbar input:focus { outline: none; border-color: var(--accent); }
+  .promptbar button {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 10px 22px; font-size: 14px; font-weight: 600; cursor: pointer;
+    white-space: nowrap;
+  }
+  .promptbar button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .promptbar label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--muted); white-space: nowrap;
+  }
+
+  .layout { flex: 1; display: grid; grid-template-columns: 260px 1fr 1fr; min-height: 0; }
+  .col { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  .col:last-child { border-right: none; }
+  .col-head {
+    padding: 8px 14px; font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .col-head button {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 5px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+  }
+
+  #log {
+    flex: 1; overflow-y: auto; padding: 10px 14px;
+    font-family: var(--mono); font-size: 12px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word; color: #c9d1d9;
+  }
+  #log .err { color: var(--red); }
+  #log .ok { color: var(--green); }
+  #log .warn { color: var(--yellow); }
+
+  #tree { flex: 1; overflow-y: auto; padding: 8px 0; font-family: var(--mono); font-size: 12.5px; }
+  #tree div { padding: 3px 14px; cursor: pointer; color: var(--muted); }
+  #tree div:hover { color: var(--text); background: var(--panel-2); }
+  #tree div.active { color: var(--accent); background: var(--panel-2); }
+  #tree div.dir { color: var(--text); font-weight: 600; cursor: default; }
+
+  #viewer {
+    flex: 1; overflow: auto; padding: 12px 16px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+    white-space: pre-wrap; word-break: break-word; color: #adbac7;
+  }
+  .placeholder { color: var(--muted); font-style: italic; padding: 20px 14px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>🛡️ HyperDev Workspace UI</h1>
+    <span class="sub">Autonomous Developer + Security Auditor · AntiGravity-Lite</span>
+    <span id="verdict" class="badge">idle</span>
+  </header>
+
+  <div class="promptbar">
+    <input id="prompt" type="text"
+      placeholder='e.g. "Build a tiny CLI notes app with add/list/find, persisted to notes.json"'
+      autocomplete="off" />
+    <label><input type="checkbox" id="autoFix" checked /> auto-fix</label>
+    <button id="buildBtn">⚡ Build &amp; Secure</button>
+  </div>
+
+  <div class="layout">
+    <div class="col">
+      <div class="col-head">Generated Files <button id="refreshTree">refresh</button></div>
+      <div id="tree"><div class="placeholder">No build run yet.</div></div>
+    </div>
+    <div class="col">
+      <div class="col-head">Live Terminal</div>
+      <div id="log"><div class="placeholder">Connected. Waiting for events…</div></div>
+    </div>
+    <div class="col">
+      <div class="col-head" id="viewerTitle">Source Viewer</div>
+      <div id="viewer"><div class="placeholder">Select a file from the tree.</div></div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const logEl = $("log"), treeEl = $("tree"), viewerEl = $("viewer");
+const verdictEl = $("verdict"), buildBtn = $("buildBtn");
+let autoScroll = true;
+let currentPath = null;
+
+logEl.addEventListener("scroll", () => {
+  autoScroll = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+});
+
+function classify(line) {
+  if (/exit=\d|error|failed|BLOCK/i.test(line) && !/PASSED/i.test(line)) return "err";
+  if (/PASS|COMPLETE|✅|fix\(es\) applied|wrote /i.test(line)) return "ok";
+  if (/warn|retrying|BLOCKED \(allowlist\)/i.test(line)) return "warn";
+  return "";
+}
+
+function addLogLine(line) {
+  const placeholder = logEl.querySelector(".placeholder");
+  if (placeholder) placeholder.remove();
+  const div = document.createElement("div");
+  const cls = classify(line);
+  if (cls) div.className = cls;
+  div.textContent = line;
+  logEl.appendChild(div);
+  if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
+
+  // Live verdict tracking from the pipeline's own log output.
+  if (/DevAudit.*PASS|SECURE DELIVERY COMPLETE/i.test(line)) setVerdict("pass", "🟢 PASS");
+  else if (/BLOCK|SECURE DELIVERY BLOCKED/i.test(line)) setVerdict("block", "🚫 BLOCK");
+}
+
+function setVerdict(kind, text) {
+  verdictEl.className = "badge " + kind;
+  verdictEl.textContent = text;
+}
+
+async function refreshTree() {
+  try {
+    const res = await fetch("/api/tree");
+    const data = await res.json();
+    treeEl.innerHTML = "";
+    if (!data.files || data.files.length === 0) {
+      treeEl.innerHTML = '<div class="placeholder">No generated files yet.</div>';
+      return;
+    }
+    for (const rel of data.files) {
+      const div = document.createElement("div");
+      const isDir = rel.endsWith("/");
+      if (isDir) { div.className = "dir"; div.textContent = "📁 " + rel; }
+      else {
+        div.textContent = "📄 " + rel;
+        div.onclick = () => openFile(rel);
+      }
+      treeEl.appendChild(div);
+    }
+  } catch { treeEl.innerHTML = '<div class="placeholder">Failed to load tree.</div>'; }
+}
+
+async function openFile(rel) {
+  currentPath = rel;
+  document.querySelectorAll("#tree div").forEach((d) =>
+    d.classList.toggle("active", d.textContent.endsWith(rel))
+  );
+  $("viewerTitle").textContent = "Source Viewer — " + rel;
+  try {
+    const res = await fetch("/api/file?path=" + encodeURIComponent(rel));
+    if (!res.ok) throw new Error("not found");
+    viewerEl.textContent = await res.text();
+  } catch {
+    viewerEl.innerHTML = '<span class="placeholder">Could not load file.</span>';
+  }
+}
+
+async function refreshReportBadge() {
+  try {
+    const res = await fetch("/api/report");
+    if (!res.ok) return;
+    const md = await res.text();
+    if (/Final Merge Status[\s\S]*BLOCK/i.test(md)) setVerdict("block", "🚫 BLOCK");
+    else if (/Final Merge Status[\s\S]*PASS/i.test(md)) setVerdict("pass", "🟢 PASS");
+  } catch { /* no report yet */ }
+}
+
+function setRunning(isRunning) {
+  buildBtn.disabled = isRunning;
+  buildBtn.textContent = isRunning ? "⏳ Building…" : "⚡ Build & Secure";
+  if (isRunning) setVerdict("running", "⏳ running");
+}
+
+buildBtn.onclick = async () => {
+  const prompt = $("prompt").value.trim();
+  if (!prompt) { $("prompt").focus(); return; }
+  setRunning(true);
+  try {
+    const res = await fetch("/api/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, autoFix: $("autoFix").checked }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "failed to start" }));
+      alert(err.error);
+      setRunning(false);
+      setVerdict("", "idle");
+    }
+  } catch (e) { alert("Build request failed: " + e.message); setRunning(false); }
+};
+
+$("refreshTree").onclick = refreshTree;
+
+// Live SSE channel - replays history on (re)connect, no polling needed.
+const es = new EventSource("/api/stream");
+es.addEventListener("status", (ev) => {
+  const s = JSON.parse(ev.data);
+  setRunning(s.status === "running");
+  if (s.status === "done") setVerdict("pass", "✅ run complete");
+  else if (s.status === "failed") setVerdict("block", "❌ run failed");
+  else if (s.status === "idle") setVerdict("", "idle");
+  if (s.status === "done" || s.status === "failed") {
+    refreshTree();
+    refreshReportBadge();
+  }
+});
+es.addEventListener("log", (ev) => addLogLine(JSON.parse(ev.data)));
+
+refreshTree();
+refreshReportBadge();
+</script>
+</body>
+</html>
