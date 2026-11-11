@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { rm } from 'node:fs/promises';
+import path from 'node:path';
 import { collectGitSnapshot, collectCiSnapshot, runGitStatus, runGitLog, type GitSnapshot } from './mcp/gitTools.js';
 import { ensureAuditFixture, FIXTURE_MANIFEST } from './mcp/auditFixture.js';
 import { readFileContent } from './engine/fileSystem.js';
@@ -147,6 +149,17 @@ async function runDevMode(prompt: string, autoFixRequested: boolean = false): Pr
     console.error('[DevMode] GROQ_API_KEY is required for the autonomous developer - set it in .env first.');
     process.exitCode = 1;
     return;
+  }
+
+  // --- Clean slate: every build starts from an empty generated_app/ ---------
+  // Stale files from previous runs (different prompts, abandoned attempts)
+  // otherwise pollute the DevAudit review set and trigger false Criticals.
+  // generated_app/ is git-ignored and disposable by design.
+  try {
+    await rm(path.join(process.cwd(), GENERATED_DIR), { recursive: true, force: true });
+    console.log('[DevMode] Cleaned generated_app/ - building on a fresh slate.\n');
+  } catch (err) {
+    console.warn(`[DevMode] Could not clean generated_app/ (${(err as Error).message}) - continuing.`);
   }
 
   const result = await runCoderAgent(prompt);
