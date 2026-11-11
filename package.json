@@ -5,10 +5,10 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
-    "dashboard": "tsx src/server.ts"
+    "build": "node node_modules/typescript/bin/tsc",
+    "start": "node --import tsx src/index.ts",
+    "dev": "node --import tsx --watch src/index.ts",
+    "dashboard": "node --import tsx src/server.ts"
   },
   "keywords": [],
   "author": "",

@@ -115,29 +115,30 @@ app.post('/api/build', (req, res) => {
   }
 
   const autoFix = body.autoFix !== false; // opt-out only
-  // The prompt is embedded into a shell command on Windows (npx.cmd requires
-  // shell:true) - strip characters that could break quoting or inject commands.
+  // Defensive strip: with no shell involved argv needs no quoting, but keeping
+  // prompts shell-clean also keeps downstream logs/reports tidy.
   const safePrompt = prompt.replace(/["`$]/g, ' ').trim();
-  const args = ['tsx', 'src/index.ts', '--build', safePrompt];
+
+  // Spawn node.exe directly on tsx's CLI entry - NEVER npx.cmd with shell:true.
+  // The workspace folder name contains "&" ("Multi-Agent PR Reviewer & Security
+  // Auditor"); cmd.exe parses that as a command separator and mangles the whole
+  // launch line. Spawning a real .exe with plain argv avoids cmd.exe entirely
+  // (and the Node 24 DEP0190 args-with-shell deprecation).
+  const tsxEntry = path.join(WORKSPACE_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const args = [tsxEntry, 'src/index.ts', '--build', safePrompt];
   if (autoFix) args.push('--auto-fix');
 
   logHistory.length = 0;
   current = { status: 'running', prompt, startedAt: new Date().toISOString() };
   broadcast('status', current);
-  pushLog(`$ npx ${args.join(' ')}`);
+  pushLog(`$ node ${path.relative(WORKSPACE_ROOT, tsxEntry)} src/index.ts --build "${safePrompt}"${autoFix ? ' --auto-fix' : ''}`);
   res.json({ started: true, pid: null });
 
-  const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  // Node refuses to spawn .cmd files directly (EINVAL since the 2024 security
-  // fix) - on Windows go through the shell, with the prompt pre-quoted.
-  const spawnArgs =
-    process.platform === 'win32' ? args.map((a, i) => (i === 3 ? `"${a}"` : a)) : args;
-
   try {
-    child = spawn(command, spawnArgs, {
+    child = spawn(process.execPath, args, {
       cwd: WORKSPACE_ROOT,
       env: process.env,
-      shell: process.platform === 'win32',
+      windowsHide: true,
     });
   } catch (err) {
     child = null;
